@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { getDb, dbGet, dbAll, dbRun, persistDb, isPg } = require('../database/db');
+const { getDb, dbGet, dbAll, dbRun, persistDb, isPg, isMysql } = require('../database/db');
 const { verifyToken } = require('../middleware/auth');
 
 // ─── GET /api/balance ─────────────────────────────────────────
@@ -41,7 +41,19 @@ router.post('/deposit', verifyToken, async (req, res) => {
         const user = await dbGet(db, 'SELECT * FROM users WHERE id = ?', [userId]);
         if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
 
-        if (isPg) {
+        if (isMysql) {
+            const client = await db.getConnection();
+            try {
+                await client.beginTransaction();
+                await client.query('UPDATE users SET balance = balance + ? WHERE id = ?', [depositAmount, userId]);
+                await client.query(
+                    'INSERT INTO transactions (sender_id, receiver_id, amount, type) VALUES (?, ?, ?, ?)',
+                    [userId, userId, depositAmount, 'deposit']
+                );
+                await client.commit();
+            } catch (e) { await client.rollback(); throw e; }
+            finally { client.release(); }
+        } else if (isPg) {
             const client = await db.connect();
             try {
                 await client.query('BEGIN');
@@ -110,7 +122,20 @@ router.post('/transfer', verifyToken, async (req, res) => {
                 message: `Insufficient balance. Your current balance is ₹${parseFloat(sender.balance).toFixed(2)}.`
             });
 
-        if (isPg) {
+        if (isMysql) {
+            const client = await db.getConnection();
+            try {
+                await client.beginTransaction();
+                await client.query('UPDATE users SET balance = balance - ? WHERE id = ?', [transferAmount, senderId]);
+                await client.query('UPDATE users SET balance = balance + ? WHERE id = ?', [transferAmount, receiver.id]);
+                await client.query(
+                    'INSERT INTO transactions (sender_id, receiver_id, amount, type) VALUES (?, ?, ?, ?)',
+                    [senderId, receiver.id, transferAmount, 'transfer']
+                );
+                await client.commit();
+            } catch (e) { await client.rollback(); throw e; }
+            finally { client.release(); }
+        } else if (isPg) {
             const client = await db.connect();
             try {
                 await client.query('BEGIN');

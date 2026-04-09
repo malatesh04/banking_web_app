@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
-const { getDb, dbRun, dbGet, persistDb, generateAccountNumber, isPg } = require('../database/db');
+const { getDb, dbRun, dbGet, persistDb, generateAccountNumber, isPg, isMysql } = require('../database/db');
 const { generateToken } = require('../middleware/auth');
 
 // ─── POST /api/register ──────────────────────────────────────
@@ -36,7 +36,13 @@ router.post('/register', async (req, res) => {
 
         let userId;
 
-        if (isPg) {
+        if (isMysql) {
+            const [result] = await db.query(
+                'INSERT INTO users (username, phone, password, balance, account_number) VALUES (?, ?, ?, ?, ?)',
+                [username.trim(), phone.trim(), hashedPassword, 0.0, accountNumber]
+            );
+            userId = result.insertId;
+        } else if (isPg) {
             // PostgreSQL: use RETURNING id
             const result = await db.query(
                 'INSERT INTO users (username, phone, password, balance, account_number) VALUES ($1, $2, $3, $4, $5) RETURNING id',

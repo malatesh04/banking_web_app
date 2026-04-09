@@ -107,7 +107,7 @@ app.get('/api/health', async (req, res) => {
     };
 
     try {
-        const { getDb, dbGet, isPg } = require('./src/database/db');
+        const { getDb, dbGet, isPg, isMysql } = require('./src/database/db');
 
         // If we don't have a DB URL and we are on Vercel, we know it will likely fail 
         // because of sql.js WASM issues. Let's catch that specifically.
@@ -126,7 +126,7 @@ app.get('/api/health', async (req, res) => {
         const result = await dbGet(db, 'SELECT 1 as connected');
         res.json({
             status: 'ok',
-            database: isPg ? 'PostgreSQL' : 'SQLite',
+            database: isMysql ? 'MySQL' : (isPg ? 'PostgreSQL' : 'SQLite'),
             connected: !!result,
             env: envData
         });

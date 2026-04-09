@@ -3,23 +3,108 @@ require('dotenv').config();
  * State Bank of Karnataka — Database Layer
  *
  * LOCAL  (development) : sql.js SQLite  → bank.db
- * PRODUCTION (Vercel)  : Neon PostgreSQL → DATABASE_URL env var
+ * PRODUCTION (Vercel)  : Neon PostgreSQL / Aiven MySQL → DATABASE_URL env var
  */
 
 const isProd = process.env.NODE_ENV === 'production' || !!process.env.VERCEL;
 const hasDbUrl = !!process.env.DATABASE_URL;
+const isMysql = hasDbUrl && process.env.DATABASE_URL.startsWith('mysql');
+const isPg = hasDbUrl && !isMysql;
 
 if (isProd && !hasDbUrl) {
   const errorMsg = '❌ FATAL ERROR: Running on Vercel but DATABASE_URL is missing. SQLite fallback is not supported in serverless environments. Please add DATABASE_URL to your Vercel Project Settings.';
   console.error(errorMsg);
-  // We don't throw immediately to allow the health check route to report this gracefully
 }
 
+if (isMysql) {
+  console.log('🌐 Database Mode: MySQL (Production)');
 
-// ═══════════════════════════════════════════════════════
-//  PRODUCTION — Neon / PostgreSQL
-// ═══════════════════════════════════════════════════════
-if (hasDbUrl) {
+  const mysql = require('mysql2/promise');
+  const pool = mysql.createPool({
+    uri: process.env.DATABASE_URL,
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0,
+    ssl: { rejectUnauthorized: false }
+  });
+
+  let initializationPromise = null;
+
+  async function getDb() {
+    if (initializationPromise) return initializationPromise;
+
+    initializationPromise = (async () => {
+      try {
+        await pool.query(`
+          CREATE TABLE IF NOT EXISTS users (
+            id             INT AUTO_INCREMENT PRIMARY KEY,
+            username       VARCHAR(255) NOT NULL,
+            phone          VARCHAR(50) UNIQUE NOT NULL,
+            password       VARCHAR(255) NOT NULL,
+            balance        DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+            account_number VARCHAR(100) UNIQUE,
+            jwt_token      TEXT,
+            created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          )
+        `);
+        await pool.query(`
+          CREATE TABLE IF NOT EXISTS transactions (
+            id          INT AUTO_INCREMENT PRIMARY KEY,
+            sender_id   INT NOT NULL,
+            receiver_id INT NOT NULL,
+            amount      DECIMAL(15,2) NOT NULL,
+            type        VARCHAR(50) NOT NULL DEFAULT 'transfer',
+            timestamp   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (sender_id) REFERENCES users(id),
+            FOREIGN KEY (receiver_id) REFERENCES users(id)
+          )
+        `);
+        console.log('✅ MySQL schema ready');
+        return pool;
+      } catch (err) {
+        console.error('❌ MySQL Schema Error:', err.message);
+        initializationPromise = null;
+        throw err;
+      }
+    })();
+
+    return initializationPromise;
+  }
+
+  async function dbRun(db, sql, params) {
+    const [result] = await db.execute(sql, params || []);
+    return { lastID: result.insertId || null, rowCount: result.affectedRows };
+  }
+
+  async function dbGet(db, sql, params) {
+    const [rows] = await db.query(sql, params || []);
+    return rows.length > 0 ? rows[0] : null;
+  }
+
+  async function dbAll(db, sql, params) {
+    const [rows] = await db.query(sql, params || []);
+    return rows;
+  }
+
+  function persistDb() { }
+
+  async function generateAccountNumber(db) {
+    const BANK_CODE = '4501';
+    let acctNum;
+    let attempts = 0;
+    while (attempts < 100) {
+      const random6 = String(Math.floor(100000 + Math.random() * 900000));
+      acctNum = BANK_CODE + random6;
+      const row = await dbGet(db, 'SELECT id FROM users WHERE account_number = ?', [acctNum]);
+      if (!row) return acctNum;
+      attempts++;
+    }
+    throw new Error('Could not generate unique account number.');
+  }
+
+  module.exports = { getDb, dbRun, dbGet, dbAll, persistDb, generateAccountNumber, isPg: false, isMysql: true };
+
+} else if (isPg) {
   console.log('🌐 Database Mode: PostgreSQL (Production)');
 
   const { Pool } = require('pg');
@@ -28,10 +113,8 @@ if (hasDbUrl) {
     ssl: { rejectUnauthorized: false }
   });
 
-  // Force environment to ignore self-signed cert errors for pg
   process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
-  /** Convert ? placeholders (SQLite style) to $1 $2 … (Postgres style) */
   function toPostgres(sql) {
     let i = 0;
     return sql.replace(/\?/g, () => `$${++i}`);
@@ -74,7 +157,7 @@ if (hasDbUrl) {
       } catch (err) {
         await client.query('ROLLBACK');
         console.error('❌ Postgres Schema Error:', err.message);
-        initializationPromise = null; // Allow retry
+        initializationPromise = null;
         throw err;
       } finally {
         client.release();
@@ -115,7 +198,7 @@ if (hasDbUrl) {
     throw new Error('Could not generate unique account number.');
   }
 
-  module.exports = { getDb, dbRun, dbGet, dbAll, persistDb, generateAccountNumber, isPg: true };
+  module.exports = { getDb, dbRun, dbGet, dbAll, persistDb, generateAccountNumber, isPg: true, isMysql: false };
 
 } else {
   // ═══════════════════════════════════════════════════════
@@ -139,8 +222,6 @@ if (hasDbUrl) {
   async function getDb() {
     if (dbInstance) return dbInstance;
 
-    // On Vercel, this will likely fail unless WASM is bundled.
-    // We delay this require until absolutely needed.
     const initSqlJs = require('sql.js');
     const SQL = await initSqlJs();
 
@@ -223,5 +304,5 @@ if (hasDbUrl) {
     throw new Error('Could not generate unique account number.');
   }
 
-  module.exports = { getDb, dbRun, dbGet, dbAll, persistDb, generateAccountNumber, isPg: false };
+  module.exports = { getDb, dbRun, dbGet, dbAll, persistDb, generateAccountNumber, isPg: false, isMysql: false };
 }
